@@ -341,39 +341,28 @@ if (!_isOnline) document.getElementById('offline-banner').classList.add('show');
 // ════════════════════════════════════════════════════════════
 // COMUNICACIÓN CON GAS — fetch con fallback offline
 // ════════════════════════════════════════════════════════════
+// Una sola función — todo por GET para evitar CORS preflight en GAS
 function gasCall(accion, params) {
   return new Promise(function(resolve, reject) {
     var url = new URL(GAS_URL);
     url.searchParams.set('accion', accion);
     if (params) {
       Object.keys(params).forEach(function(k) {
-        if (typeof params[k] === 'object') {
-          url.searchParams.set(k, JSON.stringify(params[k]));
-        } else {
-          url.searchParams.set(k, params[k]);
-        }
+        var v = params[k];
+        if (v === null || v === undefined) return;
+        url.searchParams.set(k, typeof v === 'object' ? JSON.stringify(v) : v);
       });
     }
-    fetch(url.toString(), { method: 'GET', mode: 'cors' })
+    fetch(url.toString())
       .then(function(r) { return r.json(); })
       .then(resolve)
       .catch(reject);
   });
 }
 
+// Alias — todo va por GET
 function gasPost(accion, body) {
-  return new Promise(function(resolve, reject) {
-    var payload = Object.assign({ accion: accion }, body);
-    fetch(GAS_URL, {
-      method: 'POST',
-      mode: 'cors',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-    .then(function(r) { return r.json(); })
-    .then(resolve)
-    .catch(reject);
-  });
+  return gasCall(accion, body);
 }
 
 // ════════════════════════════════════════════════════════════
