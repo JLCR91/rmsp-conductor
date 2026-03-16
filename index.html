@@ -322,21 +322,35 @@ function updatePendingBadge() {
 // ════════════════════════════════════════════════════════════
 // ONLINE / OFFLINE DETECTION
 // ════════════════════════════════════════════════════════════
-window.addEventListener('online', function() {
-  _isOnline = true;
-  document.getElementById('offline-banner').classList.remove('show');
-  var q = getQueue();
-  if (q.length > 0) {
-    document.getElementById('sync-banner').classList.add('show');
-  }
-});
-window.addEventListener('offline', function() {
+window.addEventListener('online',  function() { _checkOnline(); });
+window.addEventListener('offline', function() { _setOffline(); });
+
+function _checkOnline() {
+  // Verificar con fetch real — navigator.onLine no es confiable en iOS
+  fetch(GAS_URL + '?accion=ping', { cache: 'no-store' })
+    .then(function() {
+      _isOnline = true;
+      document.getElementById('offline-banner').classList.remove('show');
+      var q = getQueue();
+      if (q.length > 0) {
+        document.getElementById('sync-banner').classList.add('show');
+        document.getElementById('sync-banner').textContent =
+          '↑ Conexión restaurada — toca para sincronizar ' + q.length + ' acción(es)';
+      }
+    })
+    .catch(function() { _setOffline(); });
+}
+
+function _setOffline() {
   _isOnline = false;
   document.getElementById('offline-banner').classList.add('show');
   document.getElementById('sync-banner').classList.remove('show');
-});
-// Estado inicial
-if (!_isOnline) document.getElementById('offline-banner').classList.add('show');
+}
+
+// Verificar conexión real al iniciar
+setTimeout(_checkOnline, 1000);
+// Re-verificar cada 15 segundos
+setInterval(_checkOnline, 15000);
 
 // ════════════════════════════════════════════════════════════
 // COMUNICACIÓN CON GAS — fetch con fallback offline
@@ -372,14 +386,34 @@ function sincronizarPendientes() {
   var q = getQueue();
   if (q.length === 0) {
     document.getElementById('sync-banner').classList.remove('show');
+    updatePendingBadge();
     return;
   }
   document.getElementById('sync-banner').textContent = '⏳ Sincronizando ' + q.length + ' acción(es)...';
   var item = q[0];
-  gasPost('avanzarEstado', {
-    token: _token, id_eval: _activo ? _activo.id_eval : item.datos.id_eval,
-    tipo: item.tipo, datos: item.datos
-  })
+  var evalId = (_activo && _activo.id_eval) ? _activo.id_eval : item.datos.id_eval;
+  // Separar fotoBase64 del resto para no superar límite de URL
+  var datos = item.datos || {};
+  var foto  = datos.fotoBase64 || '';
+  var params = {
+    token:   _token,
+    id_eval: evalId,
+    tipo:    item.tipo,
+    km:      datos.km || '',
+    gps:     datos.gps ? JSON.stringify(datos.gps) : ''
+  };
+  // Si hay foto usar POST simple (text/plain), si no usar GET
+  var promise;
+  if (foto) {
+    var payload = Object.assign({ accion: 'avanzarEstado' }, params, { fotoBase64: foto, mimeType: datos.mimeType || 'image/jpeg' });
+    promise = new Promise(function(resolve, reject) {
+      fetch(GAS_URL, { method: 'POST', body: JSON.stringify(payload) })
+        .then(function(r) { return r.json(); }).then(resolve).catch(reject);
+    });
+  } else {
+    promise = gasCall('avanzarEstado', params);
+  }
+  promise
   .then(function(r) {
     if (r && r.exito) {
       q.shift();
@@ -658,12 +692,27 @@ function ejecutarAccion(tipo, datos) {
   if (_isOnline) {
     // Con señal: enviar directo
     _mostrarSpinner();
-    gasPost('avanzarEstado', {
-      token: _token,
-      id_eval: _activo.id_eval,
-      tipo: tipo,
-      datos: datos
-    })
+    var foto = datos.fotoBase64 || '';
+    var params = {
+      token:    _token,
+      id_eval:  _activo.id_eval,
+      tipo:     tipo,
+      km:       datos.km || '',
+      gps:      datos.gps ? JSON.stringify(datos.gps) : ''
+    };
+    var promise;
+    if (foto) {
+      // Con foto: POST sin Content-Type header (evita preflight)
+      var payload = Object.assign({ accion: 'avanzarEstado' }, params,
+        { fotoBase64: foto, mimeType: datos.mimeType || 'image/jpeg' });
+      promise = new Promise(function(resolve, reject) {
+        fetch(GAS_URL, { method: 'POST', body: JSON.stringify(payload) })
+          .then(function(r) { return r.json(); }).then(resolve).catch(reject);
+      });
+    } else {
+      promise = gasCall('avanzarEstado', params);
+    }
+    promise
     .then(function(r) {
       if (r && r.exito) {
         saveLocalState({ activo: _activo, pendientes: [] });
@@ -718,7 +767,9 @@ function abrirModal(tipo, title, sub, conKm, conFoto) {
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-sub').textContent   = sub;
   document.getElementById('km-wrap').style.display   = conKm  ? 'block' : 'none';
-  document.getElementById('foto-btns').style.display = conFoto ? 'flex'  : 'none';
+  document.getElementById('foto-btns').style.display   = conFoto ? 'flex'  : 'none';
+  document.getElementById('foto-btns').style.opacity        = '1';
+  document.getElementById('foto-btns').style.pointerEvents  = 'auto';
   document.getElementById('km-input').value = '';
   document.getElementById('preview-wrap').style.display = 'none';
   document.getElementById('modal-msg').textContent = '';
@@ -748,6 +799,9 @@ function onFileSelected(input) {
     document.getElementById('btn-confirmar').disabled = false;
     document.getElementById('modal-msg').textContent = '✅ ' + kbOrig + ' KB → ' + kbComp + ' KB';
     document.getElementById('modal-msg').className   = 'modal-msg ok';
+    // Deshabilitar botones de foto — ya hay una seleccionada
+    document.getElementById('foto-btns').style.opacity = '0.4';
+    document.getElementById('foto-btns').style.pointerEvents = 'none';
   });
 }
 
