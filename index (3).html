@@ -1,0 +1,838 @@
+<!--
+  ARCHIVO: conductor_pwa_v1.html
+  Versión: 1.0 · S173 · 2026-03-16
+  Rol:     CONDUCTOR — PWA standalone con soporte offline completo
+  Deploy:  GitHub Pages / Netlify / cualquier CDN estático
+  Comunicación con GAS: fetch() con cola offline en localStorage
+  
+  INSTRUCCIONES DE DEPLOY:
+  1. Subir este archivo a GitHub Pages o Netlify
+  2. Cambiar GAS_URL en la config por la URL real del script GAS
+  3. El conductor accede una vez con WiFi → queda cacheado
+  4. Funciona sin internet hasta sincronizar al recuperar señal
+-->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#08090C">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mi Viaje">
+<title>Mi Viaje — RMSP</title>
+
+<!-- PWA manifest inline -->
+<script>
+// Registrar Service Worker para cache offline
+if ('serviceWorker' in navigator) {
+  // SW inline via blob — no requiere archivo separado
+  var swCode = `
+    const CACHE = 'rmsp-conductor-v1';
+    const ASSETS = [self.location.href];
+    self.addEventListener('install', e => {
+      e.waitUntil(
+        caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())
+      );
+    });
+    self.addEventListener('activate', e => {
+      e.waitUntil(self.clients.claim());
+    });
+    self.addEventListener('fetch', e => {
+      // Solo cachear GET de esta misma página — las llamadas a GAS van directo
+      if (e.request.method !== 'GET') return;
+      if (e.request.url.includes('script.google.com')) return;
+      e.respondWith(
+        caches.match(e.request).then(cached => {
+          return cached || fetch(e.request).then(res => {
+            const clone = res.clone();
+            caches.open(CACHE).then(c => c.put(e.request, clone));
+            return res;
+          }).catch(() => cached);
+        })
+      );
+    });
+  `;
+  var blob = new Blob([swCode], { type: 'application/javascript' });
+  var swUrl = URL.createObjectURL(blob);
+  navigator.serviceWorker.register(swUrl).catch(function(){});
+}
+</script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Syne:wght@400;600;700;800&display=swap');
+:root {
+  --bg:      #08090C;
+  --s1:      #0F1117;
+  --s2:      #161B25;
+  --s3:      #1C2230;
+  --border:  #1E2535;
+  --accent:  #F0A500;
+  --blue:    #3D8EF0;
+  --blue-lo: #3D8EF018;
+  --green:   #2EA043;
+  --green-lo:#2EA04320;
+  --red:     #E05252;
+  --red-lo:  #E0525218;
+  --yellow:  #F5C842;
+  --cyan:    #22D3EE;
+  --text:    #E2E8F0;
+  --muted:   #5E7091;
+  --muted-hi:#8A9FC0;
+  --mono:    'JetBrains Mono', monospace;
+  --sans:    'Syne', sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html { width:100%; overflow-x:hidden; }
+body { background:var(--bg); color:var(--text); font-family:var(--sans); min-height:100vh; width:100%; max-width:480px; margin:0 auto; overflow-x:hidden; }
+
+/* NAV */
+.nav { display:flex; align-items:center; justify-content:space-between; padding:0 16px; height:52px; background:var(--s1); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:10; }
+.nav-brand { display:flex; align-items:center; gap:8px; }
+.nav-logo { width:26px; height:26px; background:#E05252; border-radius:5px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:10px; color:white; letter-spacing:-0.5px; }
+.nav-title { font-size:11px; font-weight:700; letter-spacing:2px; }
+.nav-rol { font-size:8px; font-family:var(--mono); color:var(--cyan); }
+.nav-user { font-size:10px; color:var(--muted); font-family:var(--mono); }
+.nav-right { display:flex; align-items:center; gap:10px; }
+.btn-logout { font-size:10px; font-family:var(--mono); color:var(--muted); background:none; border:1px solid var(--border); border-radius:4px; padding:4px 10px; cursor:pointer; }
+
+/* OFFLINE BANNER */
+.offline-banner { display:none; background:#7C3F00; border-bottom:1px solid #F0A50040; padding:8px 16px; font-size:11px; font-family:var(--mono); color:var(--accent); gap:8px; align-items:center; }
+.offline-banner.show { display:flex; }
+.offline-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); animation:pulse 1.5s infinite; }
+
+/* SYNC BANNER */
+.sync-banner { display:none; background:#0D2E1A; border-bottom:1px solid #2EA04340; padding:8px 16px; font-size:11px; font-family:var(--mono); color:var(--green); gap:8px; align-items:center; cursor:pointer; }
+.sync-banner.show { display:flex; }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* MAIN */
+.main { padding:16px; }
+
+/* SPINNER */
+.spinner-wrap { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:200px; gap:16px; }
+.spinner { width:32px; height:32px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+.spinner-msg { font-size:11px; font-family:var(--mono); color:var(--muted); }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* EQUIPO CARD */
+.equipo-card { background:var(--s1); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:16px; }
+.eq-rig { font-size:9px; font-family:var(--mono); color:var(--muted); letter-spacing:1px; margin-bottom:4px; }
+.eq-nombre { font-size:20px; font-weight:800; margin-bottom:2px; }
+.eq-id { font-size:10px; font-family:var(--mono); color:var(--cyan); margin-bottom:8px; }
+.eq-ruta { font-size:12px; color:var(--muted-hi); }
+.eq-ruta strong { color:var(--text); }
+
+/* TIMELINE */
+.timeline { background:var(--s1); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:16px; }
+.paso { display:flex; gap:12px; align-items:flex-start; margin-bottom:4px; }
+.paso-dot-wrap { display:flex; flex-direction:column; align-items:center; }
+.paso-dot { width:24px; height:24px; border-radius:50%; border:2px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:10px; font-family:var(--mono); font-weight:700; flex-shrink:0; }
+.paso-dot.done   { background:var(--green);   border-color:var(--green);   color:#000; }
+.paso-dot.active { background:var(--accent);  border-color:var(--accent);  color:#000; }
+.paso-dot.wait   { background:var(--blue-lo); border-color:var(--blue);    color:var(--blue); }
+.paso-dot.pending{ background:var(--s2);      border-color:var(--border);  color:var(--muted); }
+.paso-line { width:2px; height:16px; background:var(--border); margin:2px 0; }
+.paso-line.done { background:var(--green); }
+.paso-info { padding-top:3px; flex:1; }
+.paso-label { font-size:11px; font-weight:700; letter-spacing:.5px; }
+.paso-sub { font-size:9px; font-family:var(--mono); color:var(--muted); margin-top:1px; }
+.paso-sub.ok   { color:var(--green); }
+.paso-sub.wait { color:var(--blue); }
+
+/* BOTONES ACCION */
+.btn-accion { width:100%; padding:18px; border-radius:12px; border:none; font-size:14px; font-weight:800; letter-spacing:1px; font-family:var(--sans); cursor:pointer; display:flex; align-items:center; justify-content:center; gap:10px; transition:opacity .15s, transform .1s; margin-bottom:10px; }
+.btn-accion:active { transform:scale(.97); }
+.btn-accion:disabled { opacity:.4; cursor:default; }
+.btn-accion.verde    { background:var(--green);  color:#fff; }
+.btn-accion.azul     { background:var(--blue);   color:#fff; }
+.btn-accion.amarillo { background:var(--accent);  color:#000; }
+.btn-accion.esperar  { background:var(--s2); color:var(--muted); border:1px solid var(--border); }
+
+/* ESPERA BOX */
+.espera-box { background:var(--blue-lo); border:1px solid var(--blue); border-radius:12px; padding:20px; text-align:center; margin-bottom:12px; }
+.espera-icon { font-size:32px; margin-bottom:8px; }
+.espera-txt  { font-size:13px; font-weight:700; margin-bottom:4px; }
+.espera-sub  { font-size:11px; font-family:var(--mono); color:var(--muted-hi); }
+
+/* PENDIENTES */
+.pendientes-title { font-size:9px; letter-spacing:1px; color:var(--muted); font-family:var(--mono); margin:20px 0 8px; }
+.pend-card { background:var(--s2); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:8px; font-size:12px; }
+.pend-id   { font-size:9px; font-family:var(--mono); color:var(--muted); margin-top:2px; }
+
+/* EMPTY */
+.empty { text-align:center; padding:60px 20px; }
+.empty-icon  { font-size:48px; margin-bottom:16px; }
+.empty-title { font-size:18px; font-weight:800; margin-bottom:8px; }
+.empty-sub   { font-size:12px; font-family:var(--mono); color:var(--muted); }
+
+/* MODAL FOTO/ACCIÓN */
+.modal-accion { display:none; position:fixed; inset:0; background:#000000CC; z-index:100; align-items:flex-end; }
+.modal-accion.open { display:flex; }
+.modal-box { background:var(--s1); border-radius:16px 16px 0 0; padding:24px 20px 32px; width:100%; border-top:1px solid var(--border); }
+.modal-title { font-size:14px; font-weight:800; letter-spacing:1px; margin-bottom:4px; }
+.modal-sub   { font-size:10px; font-family:var(--mono); color:var(--muted); margin-bottom:16px; }
+.km-wrap { margin-bottom:14px; }
+.km-label { font-size:10px; font-family:var(--mono); color:var(--muted); margin-bottom:6px; letter-spacing:.5px; }
+.km-input { width:100%; padding:14px; background:var(--s2); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:18px; font-family:var(--mono); font-weight:700; text-align:center; outline:none; }
+.km-input:focus { border-color:var(--accent); }
+.upload-btns { display:flex; gap:10px; margin-bottom:12px; }
+.btn-upload { flex:1; padding:14px; border-radius:10px; border:none; font-size:12px; font-weight:700; font-family:var(--sans); cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:6px; }
+.btn-upload.camera { background:var(--accent); color:#000; }
+.btn-upload.file   { background:var(--s3); color:var(--text); border:1px solid var(--border); }
+.btn-upload span   { font-size:22px; }
+.preview-wrap { margin-bottom:12px; border-radius:8px; overflow:hidden; display:none; }
+.preview-img  { width:100%; max-height:180px; object-fit:cover; }
+.modal-msg { font-size:10px; font-family:var(--mono); color:var(--muted); margin-bottom:10px; min-height:14px; }
+.modal-msg.ok  { color:var(--green); }
+.modal-msg.err { color:var(--red); }
+.btn-confirmar { width:100%; padding:16px; border-radius:10px; border:none; background:var(--green); color:#fff; font-size:14px; font-weight:800; font-family:var(--sans); cursor:pointer; }
+.btn-confirmar:disabled { opacity:.4; }
+.btn-cancelar  { width:100%; padding:12px; border-radius:10px; border:1px solid var(--border); background:none; color:var(--muted); font-size:12px; font-family:var(--mono); cursor:pointer; margin-top:8px; }
+
+/* PENDING BADGE */
+.pending-badge { display:none; background:var(--accent); color:#000; border-radius:8px; padding:6px 12px; font-size:10px; font-family:var(--mono); font-weight:700; margin-bottom:10px; text-align:center; }
+.pending-badge.show { display:block; }
+
+/* LOGIN */
+.login-wrap { padding:32px 20px; }
+.login-title { font-size:22px; font-weight:800; margin-bottom:4px; }
+.login-sub { font-size:11px; font-family:var(--mono); color:var(--muted); margin-bottom:24px; }
+.login-field { margin-bottom:14px; }
+.login-label { font-size:10px; font-family:var(--mono); color:var(--muted); letter-spacing:.5px; margin-bottom:6px; display:block; }
+.login-input { width:100%; padding:14px; background:var(--s2); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; font-family:var(--mono); outline:none; }
+.login-input:focus { border-color:var(--accent); }
+.btn-login { width:100%; padding:16px; border-radius:10px; border:none; background:var(--accent); color:#000; font-size:14px; font-weight:800; font-family:var(--sans); cursor:pointer; margin-top:8px; }
+.login-err { font-size:11px; font-family:var(--mono); color:var(--red); margin-top:8px; min-height:16px; text-align:center; }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="nav">
+  <div class="nav-brand">
+    <div class="nav-logo">RM</div>
+    <div>
+      <div class="nav-title">RIG MOVE</div>
+      <div class="nav-rol">CONDUCTOR</div>
+    </div>
+  </div>
+  <div class="nav-right">
+    <span class="nav-user" id="nav-user"></span>
+    <button class="btn-logout" id="btn-logout" style="display:none" onclick="cerrarSesion()">SALIR</button>
+  </div>
+</nav>
+
+<!-- OFFLINE BANNER -->
+<div class="offline-banner" id="offline-banner">
+  <div class="offline-dot"></div>
+  SIN CONEXIÓN — trabajando offline
+</div>
+
+<!-- SYNC BANNER -->
+<div class="sync-banner" id="sync-banner" onclick="sincronizarPendientes()">
+  ↑ Conexión restaurada — toca para sincronizar acciones pendientes
+</div>
+
+<!-- MAIN -->
+<div class="main" id="main-content">
+  <div class="spinner-wrap"><div class="spinner"></div><div class="spinner-msg">Iniciando...</div></div>
+</div>
+
+<!-- MODAL FOTO/ACCIÓN -->
+<div class="modal-accion" id="modal-accion">
+  <div class="modal-box">
+    <div class="modal-title" id="modal-title">ACCIÓN</div>
+    <div class="modal-sub"   id="modal-sub"></div>
+    <div class="km-wrap" id="km-wrap">
+      <div class="km-label">KM ACTUAL DEL ODÓMETRO</div>
+      <input class="km-input" id="km-input" type="number" placeholder="ej. 245" inputmode="numeric">
+    </div>
+    <div class="upload-btns" id="foto-btns">
+      <button class="btn-upload camera" onclick="document.getElementById('camera-input').click()">
+        <span>📷</span>TOMAR FOTO
+      </button>
+      <button class="btn-upload file" onclick="document.getElementById('file-input').click()">
+        <span>🖼</span>GALERÍA
+      </button>
+    </div>
+    <input type="file" id="camera-input" accept="image/*" capture="environment" style="display:none" onchange="onFileSelected(this)">
+    <input type="file" id="file-input"   accept="image/*" style="display:none" onchange="onFileSelected(this)">
+    <div class="preview-wrap" id="preview-wrap">
+      <img class="preview-img" id="preview-img" src="" alt="Preview">
+    </div>
+    <div class="modal-msg" id="modal-msg"></div>
+    <button class="btn-confirmar" id="btn-confirmar" onclick="confirmarAccion()" disabled>CONFIRMAR</button>
+    <button class="btn-cancelar" onclick="cerrarModal()">Cancelar</button>
+  </div>
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════
+// CONFIG — CAMBIAR POR URL REAL DEL SCRIPT GAS
+// ════════════════════════════════════════════════════════════
+var GAS_URL = 'https://script.google.com/macros/s/TU_DEPLOYMENT_ID/exec';
+
+// ════════════════════════════════════════════════════════════
+// ESTADO GLOBAL
+// ════════════════════════════════════════════════════════════
+var _token        = '';
+var _activo       = null;
+var _accionActual = null;
+var _fotoBase64   = null;
+var _fotoMime     = null;
+var _gpsData      = null;
+var _isOnline     = navigator.onLine;
+
+// ════════════════════════════════════════════════════════════
+// OFFLINE QUEUE — acciones pendientes en localStorage
+// ════════════════════════════════════════════════════════════
+var QUEUE_KEY = 'rmsp_queue';
+var STATE_KEY = 'rmsp_state';
+var TOKEN_KEY = 'rmsp_token';
+
+function getQueue() {
+  try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]'); } catch(e) { return []; }
+}
+function saveQueue(q) {
+  try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch(e) {}
+}
+function addToQueue(tipo, datos) {
+  var q = getQueue();
+  q.push({ id: Date.now(), tipo: tipo, datos: datos, ts: new Date().toISOString() });
+  saveQueue(q);
+  updatePendingBadge();
+}
+function getLocalState() {
+  try { return JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch(e) { return null; }
+}
+function saveLocalState(data) {
+  try { localStorage.setItem(STATE_KEY, JSON.stringify(data)); } catch(e) {}
+}
+function updatePendingBadge() {
+  var q = getQueue();
+  var badge = document.getElementById('pending-badge');
+  if (badge) {
+    badge.textContent = q.length + ' acción(es) pendiente(s) de sincronizar';
+    badge.className = 'pending-badge' + (q.length > 0 ? ' show' : '');
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// ONLINE / OFFLINE DETECTION
+// ════════════════════════════════════════════════════════════
+window.addEventListener('online', function() {
+  _isOnline = true;
+  document.getElementById('offline-banner').classList.remove('show');
+  var q = getQueue();
+  if (q.length > 0) {
+    document.getElementById('sync-banner').classList.add('show');
+  }
+});
+window.addEventListener('offline', function() {
+  _isOnline = false;
+  document.getElementById('offline-banner').classList.add('show');
+  document.getElementById('sync-banner').classList.remove('show');
+});
+// Estado inicial
+if (!_isOnline) document.getElementById('offline-banner').classList.add('show');
+
+// ════════════════════════════════════════════════════════════
+// COMUNICACIÓN CON GAS — fetch con fallback offline
+// ════════════════════════════════════════════════════════════
+function gasCall(accion, params) {
+  return new Promise(function(resolve, reject) {
+    var url = new URL(GAS_URL);
+    url.searchParams.set('accion', accion);
+    if (params) {
+      Object.keys(params).forEach(function(k) {
+        if (typeof params[k] === 'object') {
+          url.searchParams.set(k, JSON.stringify(params[k]));
+        } else {
+          url.searchParams.set(k, params[k]);
+        }
+      });
+    }
+    fetch(url.toString(), { method: 'GET', mode: 'cors' })
+      .then(function(r) { return r.json(); })
+      .then(resolve)
+      .catch(reject);
+  });
+}
+
+function gasPost(accion, body) {
+  return new Promise(function(resolve, reject) {
+    var payload = Object.assign({ accion: accion }, body);
+    fetch(GAS_URL, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    .then(function(r) { return r.json(); })
+    .then(resolve)
+    .catch(reject);
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+// SINCRONIZAR COLA PENDIENTE
+// ════════════════════════════════════════════════════════════
+function sincronizarPendientes() {
+  var q = getQueue();
+  if (q.length === 0) {
+    document.getElementById('sync-banner').classList.remove('show');
+    return;
+  }
+  document.getElementById('sync-banner').textContent = '⏳ Sincronizando ' + q.length + ' acción(es)...';
+  var item = q[0];
+  gasPost('avanzarEstado', {
+    token: _token, id_eval: _activo ? _activo.id_eval : item.datos.id_eval,
+    tipo: item.tipo, datos: item.datos
+  })
+  .then(function(r) {
+    if (r && r.exito) {
+      q.shift();
+      saveQueue(q);
+      if (q.length > 0) {
+        setTimeout(sincronizarPendientes, 500);
+      } else {
+        document.getElementById('sync-banner').classList.remove('show');
+        updatePendingBadge();
+        cargar();
+      }
+    } else {
+      document.getElementById('sync-banner').textContent = '↑ Error al sincronizar — toca para reintentar';
+    }
+  })
+  .catch(function() {
+    document.getElementById('sync-banner').textContent = '↑ Sin conexión — toca para reintentar';
+  });
+}
+
+// Auto-retry cada 30s si hay pendientes y hay señal
+setInterval(function() {
+  if (_isOnline && getQueue().length > 0 && _token) {
+    sincronizarPendientes();
+  }
+}, 30000);
+
+// ════════════════════════════════════════════════════════════
+// INIT
+// ════════════════════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', function() {
+  _token = localStorage.getItem(TOKEN_KEY) || '';
+  if (!_token) {
+    mostrarLogin();
+  } else {
+    cargar();
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// LOGIN
+// ════════════════════════════════════════════════════════════
+function mostrarLogin() {
+  document.getElementById('btn-logout').style.display = 'none';
+  document.getElementById('nav-user').textContent = '';
+  document.getElementById('main-content').innerHTML =
+    '<div class="login-wrap">' +
+    '<div class="login-title">Iniciar sesión</div>' +
+    '<div class="login-sub">CONDUCTOR · RIG MOVE SAFETY PRO</div>' +
+    '<div class="login-field"><label class="login-label">EMAIL</label>' +
+    '<input class="login-input" id="login-email" type="email" inputmode="email" placeholder="tu@email.com"></div>' +
+    '<div class="login-field"><label class="login-label">CI / CONTRASEÑA</label>' +
+    '<input class="login-input" id="login-pass" type="password" placeholder="••••••••"></div>' +
+    '<button class="btn-login" onclick="doLogin()">ENTRAR</button>' +
+    '<div class="login-err" id="login-err"></div>' +
+    '</div>';
+}
+
+function doLogin() {
+  var email = (document.getElementById('login-email').value || '').trim();
+  var pass  = (document.getElementById('login-pass').value  || '').trim();
+  if (!email || !pass) { document.getElementById('login-err').textContent = 'Completa los campos'; return; }
+  document.getElementById('login-err').textContent = '';
+  document.getElementById('main-content').innerHTML =
+    '<div class="spinner-wrap"><div class="spinner"></div><div class="spinner-msg">Verificando...</div></div>';
+
+  if (!_isOnline) {
+    document.getElementById('main-content').innerHTML =
+      '<div class="login-wrap"><div class="login-err" style="display:block">Sin conexión — necesitas internet para el primer ingreso.</div>' +
+      '<button class="btn-login" onclick="mostrarLogin()" style="margin-top:16px">Reintentar</button></div>';
+    return;
+  }
+
+  gasPost('login', { email: email, ci: pass })
+    .then(function(r) {
+      if (r && r.exito && r.token) {
+        _token = r.token;
+        localStorage.setItem(TOKEN_KEY, _token);
+        document.getElementById('nav-user').textContent = r.nombre || email;
+        document.getElementById('btn-logout').style.display = 'block';
+        cargar();
+      } else {
+        mostrarLogin();
+        document.getElementById('login-err').textContent = r ? (r.error || 'Credenciales incorrectas') : 'Error de conexión';
+      }
+    })
+    .catch(function() {
+      mostrarLogin();
+      document.getElementById('login-err').textContent = 'Error de conexión';
+    });
+}
+
+// ════════════════════════════════════════════════════════════
+// CARGAR VIAJE — con fallback a estado local cacheado
+// ════════════════════════════════════════════════════════════
+function cargar() {
+  document.getElementById('btn-logout').style.display = 'block';
+  document.getElementById('main-content').innerHTML =
+    '<div class="spinner-wrap"><div class="spinner"></div><div class="spinner-msg">Cargando tu viaje...</div></div>';
+
+  if (!_isOnline) {
+    // Usar estado cacheado localmente
+    var cached = getLocalState();
+    if (cached) {
+      renderViaje(cached);
+    } else {
+      document.getElementById('main-content').innerHTML =
+        '<div class="empty"><div class="empty-icon">📡</div>' +
+        '<div class="empty-title">SIN CONEXIÓN</div>' +
+        '<div class="empty-sub">Abre la app con WiFi al menos una vez para cachear tu viaje</div></div>' +
+        '<button class="btn-accion esperar" style="margin-top:16px" onclick="cargar()">↺ Reintentar</button>';
+    }
+    return;
+  }
+
+  gasCall('getChecklistsConductor', { token: _token })
+    .then(function(data) {
+      if (data && data.error === 'SESSION_INVALID') {
+        _token = '';
+        localStorage.removeItem(TOKEN_KEY);
+        mostrarLogin();
+        return;
+      }
+      saveLocalState(data);  // cachear para uso offline
+      if (data && data.nombre) {
+        document.getElementById('nav-user').textContent = data.nombre;
+      }
+      renderViaje(data);
+      // Verificar pendientes al cargar
+      var q = getQueue();
+      if (q.length > 0) {
+        document.getElementById('sync-banner').classList.add('show');
+      }
+    })
+    .catch(function() {
+      // Sin señal — usar caché
+      var cached = getLocalState();
+      if (cached) {
+        document.getElementById('offline-banner').classList.add('show');
+        renderViaje(cached);
+      } else {
+        document.getElementById('main-content').innerHTML =
+          '<div class="empty"><div class="empty-icon">⚠️</div>' +
+          '<div class="empty-title">ERROR DE CONEXIÓN</div>' +
+          '<div class="empty-sub">Verifica tu señal e intenta de nuevo</div></div>' +
+          '<button class="btn-accion esperar" style="margin-top:16px" onclick="cargar()">↺ Reintentar</button>';
+      }
+    });
+}
+
+// ════════════════════════════════════════════════════════════
+// RENDER
+// ════════════════════════════════════════════════════════════
+function renderViaje(data) {
+  _activo = data ? data.activo : null;
+  var pendientes = data ? (data.pendientes || []) : [];
+  var html = '<div id="pending-badge" class="pending-badge"></div>';
+
+  if (!_activo) {
+    html += '<div class="empty"><div class="empty-icon">🏁</div>' +
+      '<div class="empty-title">SIN VIAJES ACTIVOS</div>' +
+      '<div class="empty-sub">No tienes checklists asignados en este momento</div></div>';
+    document.getElementById('main-content').innerHTML = html;
+    updatePendingBadge();
+    return;
+  }
+
+  var ev = _activo;
+  var estado = ev.estado_viaje;
+
+  // Tarjeta equipo
+  html += '<div class="equipo-card">';
+  html += '<div class="eq-rig">' + (ev.rig_no || '—') + ' · ' + ev.id_eval.substring(0,22) + '...</div>';
+  html += '<div class="eq-nombre">' + ev.equipo_nombre + '</div>';
+  html += '<div class="eq-id">' + ev.equipo_id + '</div>';
+  html += '<div class="eq-ruta">De <strong>' + (ev.origen||'—') + '</strong> a <strong>' + (ev.destino||'—') + '</strong></div>';
+  html += '</div>';
+
+  // Timeline
+  var pasos = [
+    { key:'recibir',   label:'Recibí el checklist',
+      sub: ['CHECKLIST_RECIBIDO','AMARRE_LISTO','EN_TRANSITO','LLEGADO'].indexOf(estado)>=0 ? 'Confirmado' : 'Pendiente' },
+    { key:'amarre',    label:'Amarre listo para verificar',
+      sub: ['AMARRE_LISTO','EN_TRANSITO','LLEGADO'].indexOf(estado)>=0 ? 'Confirmado' : 'Pendiente' },
+    { key:'autorizar', label:'Autorización del Supervisor',
+      sub: ev.estado_amarre === 'VERIFICADO' ? 'Autorizado ✓' : 'Esperando...' },
+    { key:'salida',    label:'Inicio del viaje',
+      sub: ev.fecha_salida ? ev.fecha_salida.substring(0,16) : 'Pendiente' },
+    { key:'retensado', label:'Retensado en ruta',
+      sub: ev.fecha_retensado ? 'km ' + ev.km_retensado : 'Pendiente' },
+    { key:'llegada',   label:'Llegada al destino',
+      sub: ev.fecha_llegada ? ev.fecha_llegada.substring(0,16) : 'Pendiente' }
+  ];
+
+  var ordenEstado = { 'PENDIENTE':0,'CHECKLIST_RECIBIDO':1,'AMARRE_LISTO':2,'EN_TRANSITO':3,'LLEGADO':5 };
+  var pasoActual = ordenEstado[estado] || 0;
+  if (estado === 'EN_TRANSITO' && ev.fecha_retensado) pasoActual = 4;
+
+  html += '<div class="timeline">';
+  pasos.forEach(function(p, i) {
+    var done   = i < pasoActual;
+    var active = i === pasoActual;
+    var isAuth = p.key === 'autorizar';
+    var dotClass = done ? 'done' : active ? (isAuth && ev.estado_amarre !== 'VERIFICADO' ? 'wait' : 'active') : 'pending';
+    var subClass = done ? 'ok' : (isAuth && ev.estado_amarre !== 'VERIFICADO' ? 'wait' : '');
+    var isLast = i === pasos.length - 1;
+    html += '<div class="paso">';
+    html += '<div class="paso-dot-wrap">';
+    html += '<div class="paso-dot ' + dotClass + '">' + (done ? '✓' : (i+1)) + '</div>';
+    if (!isLast) html += '<div class="paso-line ' + (done?'done':'') + '"></div>';
+    html += '</div>';
+    html += '<div class="paso-info"><div class="paso-label">' + p.label + '</div>';
+    html += '<div class="paso-sub ' + subClass + '">' + p.sub + '</div></div>';
+    html += '</div>';
+  });
+  html += '</div>';
+
+  // Botón de acción
+  if (estado === 'PENDIENTE') {
+    html += '<button class="btn-accion verde" onclick="accion(\'recibir_checklist\')">✓ RECIBÍ EL CHECKLIST</button>';
+  } else if (estado === 'CHECKLIST_RECIBIDO') {
+    html += '<button class="btn-accion azul" onclick="accion(\'confirmar_amarre\')">🔗 AMARRE LISTO — VERIFICAR</button>';
+  } else if (estado === 'AMARRE_LISTO') {
+    if (ev.estado_amarre === 'VERIFICADO') {
+      html += '<button class="btn-accion amarillo" onclick="accion(\'iniciar_viaje\')">🚛 INICIAR VIAJE</button>';
+    } else {
+      html += '<div class="espera-box"><div class="espera-icon">⏳</div>';
+      html += '<div class="espera-txt">Esperando verificación del Supervisor de Amarres</div>';
+      html += '<div class="espera-sub">Te notificarán cuando esté autorizado</div></div>';
+      html += '<button class="btn-accion esperar" onclick="cargar()">↺ Actualizar estado</button>';
+    }
+  } else if (estado === 'EN_TRANSITO') {
+    if (!ev.fecha_retensado) {
+      html += '<button class="btn-accion amarillo" onclick="accion(\'registrar_retensado\')">📷 REGISTRAR RETENSADO</button>';
+    } else {
+      html += '<button class="btn-accion verde" onclick="accion(\'registrar_llegada\')">🏁 REGISTRAR LLEGADA</button>';
+    }
+  }
+
+  // Próximos viajes
+  if (pendientes.length > 0) {
+    html += '<div class="pendientes-title">PRÓXIMOS VIAJES ASIGNADOS</div>';
+    pendientes.forEach(function(p) {
+      html += '<div class="pend-card"><div>' + p.equipo_id + ' — ' + p.equipo_nombre + '</div>';
+      html += '<div class="pend-id">' + p.id_eval + '</div></div>';
+    });
+  }
+
+  document.getElementById('main-content').innerHTML = html;
+  updatePendingBadge();
+}
+
+// ════════════════════════════════════════════════════════════
+// ACCIONES
+// ════════════════════════════════════════════════════════════
+function accion(tipo) {
+  if (['recibir_checklist','confirmar_amarre','iniciar_viaje'].indexOf(tipo) >= 0) {
+    var labels = {
+      recibir_checklist: '¿Confirmas que recibiste el checklist físico?',
+      confirmar_amarre:  '¿Confirmas que el amarre está listo para verificación?',
+      iniciar_viaje:     '¿Confirmas que inicias el viaje ahora?'
+    };
+    if (!confirm(labels[tipo])) return;
+    ejecutarAccion(tipo, {});
+  } else if (tipo === 'registrar_retensado') {
+    abrirModal('registrar_retensado', 'REGISTRAR RETENSADO', 'Foto del retensado + km actual', true, true);
+  } else if (tipo === 'registrar_llegada') {
+    abrirModal('registrar_llegada', 'REGISTRAR LLEGADA', 'Confirma tu llegada al destino', false, false);
+  }
+}
+
+function ejecutarAccion(tipo, datos) {
+  // Aplicar cambio optimista en estado local inmediatamente
+  _aplicarCambioLocal(tipo, datos);
+
+  if (_isOnline) {
+    // Con señal: enviar directo
+    _mostrarSpinner();
+    gasPost('avanzarEstado', {
+      token: _token,
+      id_eval: _activo.id_eval,
+      tipo: tipo,
+      datos: datos
+    })
+    .then(function(r) {
+      if (r && r.exito) {
+        saveLocalState({ activo: _activo, pendientes: [] });
+        cargar();
+      } else {
+        // Guardar en cola por si falla
+        datos.id_eval = _activo.id_eval;
+        addToQueue(tipo, datos);
+        cargar();
+      }
+    })
+    .catch(function() {
+      // Sin señal — guardar en cola
+      datos.id_eval = _activo.id_eval;
+      addToQueue(tipo, datos);
+      document.getElementById('offline-banner').classList.add('show');
+      cargar();
+    });
+  } else {
+    // Sin señal: guardar en cola y continuar
+    datos.id_eval = _activo.id_eval;
+    addToQueue(tipo, datos);
+    cargar();
+  }
+}
+
+// Actualizar estado local optimistamente sin esperar GAS
+function _aplicarCambioLocal(tipo, datos) {
+  if (!_activo) return;
+  var ahora = new Date().toISOString().substring(0,16).replace('T',' ');
+  if (tipo === 'recibir_checklist')  _activo.estado_viaje = 'CHECKLIST_RECIBIDO';
+  if (tipo === 'confirmar_amarre')   _activo.estado_viaje = 'AMARRE_LISTO';
+  if (tipo === 'iniciar_viaje')      { _activo.estado_viaje = 'EN_TRANSITO'; _activo.fecha_salida = ahora; }
+  if (tipo === 'registrar_retensado'){ _activo.fecha_retensado = ahora; _activo.km_retensado = datos.km || '—'; }
+  if (tipo === 'registrar_llegada')  { _activo.estado_viaje = 'LLEGADO'; _activo.fecha_llegada = ahora; }
+  saveLocalState({ activo: _activo, pendientes: [] });
+}
+
+function _mostrarSpinner() {
+  document.getElementById('main-content').innerHTML =
+    '<div class="spinner-wrap"><div class="spinner"></div><div class="spinner-msg">Procesando...</div></div>';
+}
+
+// ════════════════════════════════════════════════════════════
+// MODAL
+// ════════════════════════════════════════════════════════════
+function abrirModal(tipo, title, sub, conKm, conFoto) {
+  _accionActual = tipo;
+  _fotoBase64 = null;
+  _fotoMime   = null;
+  _gpsData    = null;
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-sub').textContent   = sub;
+  document.getElementById('km-wrap').style.display   = conKm  ? 'block' : 'none';
+  document.getElementById('foto-btns').style.display = conFoto ? 'flex'  : 'none';
+  document.getElementById('km-input').value = '';
+  document.getElementById('preview-wrap').style.display = 'none';
+  document.getElementById('modal-msg').textContent = '';
+  document.getElementById('modal-msg').className   = 'modal-msg';
+  // Si no requiere foto, habilitar confirmar directo
+  document.getElementById('btn-confirmar').disabled = conFoto;
+  document.getElementById('modal-accion').classList.add('open');
+  _capturarGPS();
+}
+
+function cerrarModal() {
+  document.getElementById('modal-accion').classList.remove('open');
+  _fotoBase64 = null;
+}
+
+function onFileSelected(input) {
+  if (!input.files || !input.files[0]) return;
+  var file = input.files[0];
+  if (!file.type.startsWith('image/')) { alert('Solo imágenes JPG o PNG'); return; }
+  document.getElementById('modal-msg').textContent = '⏳ Optimizando imagen...';
+  document.getElementById('modal-msg').className = 'modal-msg';
+  _comprimirImagen(file, function(b64, mime, dataUrl, kbOrig, kbComp) {
+    _fotoBase64 = b64;
+    _fotoMime   = 'image/jpeg';
+    document.getElementById('preview-img').src = dataUrl;
+    document.getElementById('preview-wrap').style.display = 'block';
+    document.getElementById('btn-confirmar').disabled = false;
+    document.getElementById('modal-msg').textContent = '✅ ' + kbOrig + ' KB → ' + kbComp + ' KB';
+    document.getElementById('modal-msg').className   = 'modal-msg ok';
+  });
+}
+
+function confirmarAccion() {
+  var btn = document.getElementById('btn-confirmar');
+  btn.disabled = true;
+  btn.textContent = '⏳ Guardando...';
+  var datos = { fotoBase64: _fotoBase64, mimeType: _fotoMime, gps: _gpsData };
+  if (_accionActual === 'registrar_retensado') {
+    datos.km = document.getElementById('km-input').value;
+    if (!datos.km) {
+      btn.disabled = false;
+      btn.textContent = 'CONFIRMAR';
+      document.getElementById('modal-msg').textContent = 'Ingresa el km actual';
+      document.getElementById('modal-msg').className = 'modal-msg err';
+      return;
+    }
+  }
+  document.getElementById('modal-accion').classList.remove('open');
+  btn.textContent = 'CONFIRMAR';
+  ejecutarAccion(_accionActual, datos);
+}
+
+// ════════════════════════════════════════════════════════════
+// GPS
+// ════════════════════════════════════════════════════════════
+function _capturarGPS() {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(
+    function(p) { _gpsData = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }; },
+    function() {},
+    { timeout: 8000, maximumAge: 60000 }
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// CERRAR SESIÓN
+// ════════════════════════════════════════════════════════════
+function cerrarSesion() {
+  if (!confirm('¿Cerrar sesión?')) return;
+  _token = '';
+  localStorage.removeItem(TOKEN_KEY);
+  // NO borrar estado local ni cola — pueden quedar pendientes
+  mostrarLogin();
+}
+
+// ════════════════════════════════════════════════════════════
+// COMPRIMIR IMAGEN
+// ════════════════════════════════════════════════════════════
+function _comprimirImagen(file, callback) {
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var img = new Image();
+    img.onload = function() {
+      var MAX = 1280;
+      var w = img.width, h = img.height;
+      if (w > MAX || h > MAX) {
+        var ratio = Math.min(MAX/w, MAX/h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
+      var canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.80);
+      var b64 = dataUrl.split(',')[1];
+      var kbOrig = Math.round(file.size / 1024);
+      var kbComp = Math.round(b64.length * 0.75 / 1024);
+      callback(b64, 'image/jpeg', dataUrl, kbOrig, kbComp);
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+</script>
+</body>
+</html>
